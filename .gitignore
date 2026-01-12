@@ -1,0 +1,37 @@
+# Go build artifacts
+tmp/
+bin/
+*.exe
+*.out
+*.test
+*.prof
+
+# Go test coverage
+*.coverprofile
+coverage.html
+coverage.out
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment / Config
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Build directories
+dist/
+build/
