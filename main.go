@@ -13,7 +13,14 @@ func route(api *api) http.Handler {
 	mux.HandleFunc("GET /users/{id}", api.getUserByIdHandler)
 	mux.HandleFunc("DELETE /users/{id}", api.deleteUserByIdHandler)
 	mux.HandleFunc("PATCH /users/{id}", api.updateUserByIdHandler)
-	return mux
+
+	var h http.Handler = mux
+
+	h = loggingMiddleware(h)
+	h = requestIDMiddleware(h)
+	h = recoverMiddleware(h)
+
+	return h
 }
 
 func main() {

@@ -58,3 +58,37 @@ Tests require `DATABASE_URL` or `TEST_DATABASE_URL` environment variable. Tests 
 ## System Design Decisions
 
 1. Used Context library for each handler. Passed Context to sql query functions so that we can get more accurate accurate error message (Timeout or Request cancelled)
+
+2. Implemented middleware (logging, requestID, panic middleware)
+
+panicMiddleware.ServeHTTP
+↓
+loggingMiddleware.ServeHTTP
+↓
+requestIDMiddleware.ServeHTTP
+↓
+handler.ServeHTTP
+↑
+requestIDMiddleware returns
+↑
+loggingMiddleware returns
+↑
+panicMiddleware returns
+
+- **Request ID**
+
+  - Ensures every request has a unique `X-Request-ID`
+  - Stored in `context.Context`
+  - Propagated to logs and responses for traceability
+
+- **Logging**
+
+  - Logs request start/end
+  - Includes method, path, status code, duration
+  - Correlates logs using request ID
+
+- **Panic recovery**
+  - Catches unexpected panics from handlers or middleware
+  - Logs panic + stack trace with request ID
+  - Returns a clean `500 Internal Server Error`
+  - Prevents a single request from crashing the server
