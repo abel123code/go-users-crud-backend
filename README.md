@@ -54,3 +54,7 @@ Tests require `DATABASE_URL` or `TEST_DATABASE_URL` environment variable. Tests 
 - `TestCreateUser` - Tests user creation
 - `TestGetUsersByID` - Tests retrieving a user by ID
 - `TestGetUsersByIDNotFound` - Tests 404 handling for non-existent users
+
+## System Design Decisions
+
+1. Used Context library for each handler. Passed Context to sql query functions so that we can get more accurate accurate error message (Timeout or Request cancelled)

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
-	"strconv"
-
-	//"errors"
+	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 	//"strconv"
 )
 
@@ -50,8 +52,15 @@ func (a *api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // getUsersHandler lists all users in the database
 func (a *api) getUsersHandler(w http.ResponseWriter, r *http.Request) {
-	users, err := a.listUsers()
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+
+	users, err := a.listUsers(ctx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, "request timeout/canceled", http.StatusGatewayTimeout)
+			return
+		}
 		http.Error(w, "failed to list users", http.StatusInternalServerError)
 		return
 	}
@@ -63,28 +72,82 @@ func (a *api) getUsersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type userResult struct {
+	user User
+	src  string
+	err  error
+}
+
+// getUserFromCache gets a user from the cache
+func (api *api) getUserFromCache(ctx context.Context, id string) (User, error) {
+	select {
+	case <-time.After(20 * time.Millisecond):
+		// simulate cache latency and miss most of the time
+		return User{}, fmt.Errorf("cache miss")
+	case <-ctx.Done():
+		return User{}, ctx.Err()
+	}
+}
+
 // getUserByIdHandler gets a user by id from the database
 func (a *api) getUserByIdHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+
 	userId := r.PathValue("id")
-	user, err := a.getUserById(userId)
-	if err != nil {
-		http.Error(w, "failed to get user", http.StatusNotFound)
-		return
+
+	resCh := make(chan userResult, 2)
+
+	go func() {
+		user, err := a.getUserFromCache(ctx, userId)
+		resCh <- userResult{user: user, src: "cache", err: err}
+	}() // go routine 1 to retrieve user from cache
+
+	go func() {
+		user, err := a.getUserById(ctx, userId)
+		resCh <- userResult{user: user, src: "db", err: err}
+	}() // go routine 2 to retrieve user from database
+
+	// Wait for the first *successful* answer (or timeout)
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		select {
+		case res := <-resCh:
+			if res.err == nil {
+				cancel() // stop the other request path
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Source", res.src)
+				w.WriteHeader(http.StatusOK)
+
+				if err := json.NewEncoder(w).Encode(res.user); err != nil {
+					http.Error(w, "failed to encode response", http.StatusInternalServerError)
+				}
+				return
+			}
+			firstErr = res.err
+		case <-ctx.Done():
+			http.Error(w, "timeout: "+ctx.Err().Error(), http.StatusGatewayTimeout)
+			return
+		}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	err = json.NewEncoder(w).Encode(user)
-	if err != nil {
-		http.Error(w, "failed to encode user", http.StatusInternalServerError)
-	}
+
+	// Both failed
+	http.Error(w, "failed: "+firstErr.Error(), http.StatusNotFound)
 }
 
 // deleteUserByIdHandler deletes a user by id from the database
 func (a *api) deleteUserByIdHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+
 	userId := r.PathValue("id")
 
-	deleted, err := a.deleteUserById(userId)
+	deleted, err := a.deleteUserById(ctx, userId)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, "request timeout/canceled", http.StatusGatewayTimeout)
+			return
+		}
 		http.Error(w, "failed to delete user", http.StatusInternalServerError)
 		return
 	}
@@ -97,6 +160,9 @@ func (a *api) deleteUserByIdHandler(w http.ResponseWriter, r *http.Request) {
 
 // createUserHandler creates a new user in the database
 func (a *api) createUserHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+
 	var payload struct {
 		FirstName string `json:"firstName"`
 		LastName  string `json:"lastName"`
@@ -114,8 +180,12 @@ func (a *api) createUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := a.createUser(payload.FirstName, payload.LastName)
+	u, err := a.createUser(ctx, payload.FirstName, payload.LastName)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, "request timeout/canceled", http.StatusGatewayTimeout)
+			return
+		}
 		http.Error(w, "failed to create user", http.StatusInternalServerError)
 		return
 	}
@@ -127,6 +197,9 @@ func (a *api) createUserHandler(w http.ResponseWriter, r *http.Request) {
 
 // updateUserByIdHandler updates a user by id from the database
 func (a *api) updateUserByIdHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil || id <= 0 {
@@ -162,8 +235,12 @@ func (a *api) updateUserByIdHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, updated, err := a.updateUserByID(id, patch.FirstName, patch.LastName)
+	u, updated, err := a.updateUserByID(ctx, id, patch.FirstName, patch.LastName)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, "request timeout/canceled", http.StatusGatewayTimeout)
+			return
+		}
 		http.Error(w, "failed to update user", http.StatusInternalServerError)
 		return
 	}
