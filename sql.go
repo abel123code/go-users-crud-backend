@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"log"
 )
 
 // createUser creates a new user in the database
@@ -49,6 +50,8 @@ func (a *api) listUsers(ctx context.Context) ([]User, error) {
 
 // getUserById gets a user by id from the database
 func (a *api) getUserById(ctx context.Context, id string) (User, error) {
+	log.Printf("DB HIT id=%s", id)
+
 	var u User
 	err := a.db.QueryRowContext(ctx,
 		`SELECT id::text, first_name, last_name, created_at

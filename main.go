@@ -31,7 +31,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	api := &api{addr: ":8080", db: db}
+	api := &api{
+		addr:     ":8080",
+		db:       db,
+		cache:    make(map[string]cacheEntry),
+		inflight: make(map[string]chan fetchResult),
+	}
 
 	srv := &http.Server{
 		Addr:    api.addr,

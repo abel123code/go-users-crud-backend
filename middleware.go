@@ -11,8 +11,6 @@ import (
 	"github.com/google/uuid"
 )
 
-type ctxKey string
-
 const requestIDKey ctxKey = "request_id"
 
 // GetRequestID safely extracts the request ID from context.
@@ -47,11 +45,7 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 
 // loggingMiddleware logs the request and response.
 
-// statusRecorder wraps http.ResponseWriter so we can capture the status code.
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
+// statusRecorder type moved to types.go
 
 func (sr *statusRecorder) WriteHeader(code int) {
 	sr.status = code

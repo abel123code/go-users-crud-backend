@@ -61,19 +61,7 @@ Tests require `DATABASE_URL` or `TEST_DATABASE_URL` environment variable. Tests 
 
 2. Implemented middleware (logging, requestID, panic middleware)
 
-panicMiddleware.ServeHTTP
-↓
-loggingMiddleware.ServeHTTP
-↓
-requestIDMiddleware.ServeHTTP
-↓
-handler.ServeHTTP
-↑
-requestIDMiddleware returns
-↑
-loggingMiddleware returns
-↑
-panicMiddleware returns
+panicMiddleware.ServeHTTP -> loggingMiddleware.ServeHTTP -> requestIDMiddleware.ServeHTTP -> handler.ServeHTTP -> requestIdMiddleware returns -> loggingMiddleware returns -> panicMiddleware returns
 
 - **Request ID**
 
@@ -92,3 +80,14 @@ panicMiddleware returns
   - Logs panic + stack trace with request ID
   - Returns a clean `500 Internal Server Error`
   - Prevents a single request from crashing the server
+
+3. Implemented Caching for individual user data
+4. Implemented InFlight de duplication for when there is to many of the same request simulatenously.
+
+Overall, i think this are one of the driest-but-most-valuable parts of backend engineering:
+
+1. caches
+2. mutexes
+3. channels
+4. in-flight dedupe
+5. invisible wins (fewer DB hits, fewer goroutines)

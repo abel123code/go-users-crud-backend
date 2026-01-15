@@ -5,17 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
-	//"strconv"
 )
-
-type api struct {
-	addr string
-	db   *sql.DB
-}
 
 func (a *api) healthHandler(w http.ResponseWriter, r *http.Request) {
 	if err := a.db.Ping(); err != nil {
@@ -72,23 +65,6 @@ func (a *api) getUsersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type userResult struct {
-	user User
-	src  string
-	err  error
-}
-
-// getUserFromCache gets a user from the cache
-func (api *api) getUserFromCache(ctx context.Context, id string) (User, error) {
-	select {
-	case <-time.After(20 * time.Millisecond):
-		// simulate cache latency and miss most of the time
-		return User{}, fmt.Errorf("cache miss")
-	case <-ctx.Done():
-		return User{}, ctx.Err()
-	}
-}
-
 // getUserByIdHandler gets a user by id from the database
 func (a *api) getUserByIdHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
@@ -96,43 +72,85 @@ func (a *api) getUserByIdHandler(w http.ResponseWriter, r *http.Request) {
 
 	userId := r.PathValue("id")
 
-	resCh := make(chan userResult, 2)
-
-	go func() {
-		user, err := a.getUserFromCache(ctx, userId)
-		resCh <- userResult{user: user, src: "cache", err: err}
-	}() // go routine 1 to retrieve user from cache
-
-	go func() {
-		user, err := a.getUserById(ctx, userId)
-		resCh <- userResult{user: user, src: "db", err: err}
-	}() // go routine 2 to retrieve user from database
-
-	// Wait for the first *successful* answer (or timeout)
-	var firstErr error
-	for i := 0; i < 2; i++ {
-		select {
-		case res := <-resCh:
-			if res.err == nil {
-				cancel() // stop the other request path
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("X-Source", res.src)
-				w.WriteHeader(http.StatusOK)
-
-				if err := json.NewEncoder(w).Encode(res.user); err != nil {
-					http.Error(w, "failed to encode response", http.StatusInternalServerError)
-				}
-				return
-			}
-			firstErr = res.err
-		case <-ctx.Done():
-			http.Error(w, "timeout: "+ctx.Err().Error(), http.StatusGatewayTimeout)
+	u, src, err := a.getUserByIdDedupe(ctx, userId)
+	if err != nil {
+		// 1) timeout / canceled
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, "request timeout/canceled", http.StatusGatewayTimeout)
 			return
+		}
+
+		// 2) not found
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+
+		// 3) everything else
+		http.Error(w, "failed to get user", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Source", src)
+	w.WriteHeader(http.StatusOK)
+	err = json.NewEncoder(w).Encode(u)
+	if err != nil {
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+// getUserByIdDedupe helps to prevent duplicate requests for the same resource
+func (a *api) getUserByIdDedupe(ctx context.Context, id string) (User, string, error) {
+	// 1) cache first
+	if u, err := a.getUserFromCache(id); err == nil {
+		return u, "cache", nil
+	}
+
+	// 2) inflight gate
+	a.inflightMu.Lock()
+	if ch, ok := a.inflight[id]; ok {
+		// follower: someone else is fetching
+		a.inflightMu.Unlock()
+
+		select {
+		case res := <-ch:
+			// leader already did DB work
+			if res.err == nil {
+				return res.user, "shared", nil
+			}
+			return User{}, "shared", res.err
+		case <-ctx.Done():
+			return User{}, "shared", ctx.Err()
 		}
 	}
 
-	// Both failed
-	http.Error(w, "failed: "+firstErr.Error(), http.StatusNotFound)
+	// leader: create waiting room
+	ch := make(chan fetchResult, 1)
+	a.inflight[id] = ch
+	a.inflightMu.Unlock()
+
+	// Ensure all followers are released no matter what
+	defer func() {
+		a.inflightMu.Lock()
+		delete(a.inflight, id)
+		a.inflightMu.Unlock()
+		close(ch)
+	}()
+
+	// 3) do DB work
+	u, err := a.getUserById(ctx, id)
+	if err == nil {
+		// fill cache (use your TTL)
+		a.setUserCache(id, u, 30*time.Second)
+	}
+
+	// 4) broadcast to followers
+	ch <- fetchResult{user: u, err: err}
+
+	if err != nil {
+		return User{}, "db", err
+	}
+	return u, "db", nil
 }
 
 // deleteUserByIdHandler deletes a user by id from the database
@@ -155,6 +173,10 @@ func (a *api) deleteUserByIdHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
+
+	// Invalidate cache for this user
+	a.invalidateUserCache(userId)
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -248,6 +270,9 @@ func (a *api) updateUserByIdHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
+
+	// Invalidate cache for this user (will be repopulated on next GET)
+	a.invalidateUserCache(u.ID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
